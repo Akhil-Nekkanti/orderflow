@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/lob", "crates/wire", "crates/replay", "crates/bench"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,8 @@
+[package]
+name = "lob"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Low-latency limit order book matching engine"
+
+[dependencies]

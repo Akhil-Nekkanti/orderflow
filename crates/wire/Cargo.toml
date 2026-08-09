@@ -1,0 +1,9 @@
+[package]
+name = "wire"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Fixed-layout binary order-entry protocol codec"
+
+[dependencies]
+lob = { path = "../lob" }

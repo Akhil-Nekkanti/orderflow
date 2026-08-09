@@ -1,0 +1,10 @@
+[package]
+name = "replay"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Deterministic workload generator and latency measurement harness"
+
+[dependencies]
+lob = { path = "../lob" }
+wire = { path = "../wire" }
