@@ -7,13 +7,15 @@ data structures to the benchmark statistics is implemented from `std` up.
 
 ```
 crates/
-  lob     the matching engine: slab-allocated order storage, intrusive
-          per-price FIFO queues, GTC/IOC/FOK, cancel and cancel/replace
-  wire    binary order-entry codec (OUCH-style fixed layouts, zero-alloc
-          streaming decode)
-  replay  deterministic workload generator + end-to-end throughput and
-          latency-percentile measurement
-  bench   dependency-free microbenchmark suite (median-of-trials)
+  lob       the matching engine: slab-allocated order storage, intrusive
+            per-price FIFO queues, GTC/IOC/FOK, cancel and cancel/replace
+  wire      binary order-entry codec (OUCH-style fixed layouts, zero-alloc
+            streaming decode)
+  replay    deterministic workload generator + end-to-end throughput and
+            latency-percentile measurement
+  bench     dependency-free microbenchmark suite (median-of-trials)
+  backtest  event-driven backtester using the engine as a simulated
+            exchange, with queue-position-accurate fills
 ```
 
 ## Design
@@ -97,6 +99,40 @@ per-message latency (sampled):
 The latency histogram is quantized by the ~100 ns Windows `Instant`
 resolution; the throughput number (56 ns/msg mean, including decode) is the
 more precise figure.
+
+## Backtester
+
+`backtest` turns the engine into a simulated exchange: a seeded background
+flow populates the book, and the strategy's orders enter the *same* book,
+competing for queue position like any other participant. Passive fills only
+happen when simulated aggressive flow actually consumes the orders queued
+ahead — no fill model is bolted on, the realism falls out of the engine's
+FIFO levels.
+
+The flow generator has a **toxicity dial**: `informed_pct` controls what
+fraction of background orders are priced off the *true* (hidden) mid versus
+the observable book mid. That single knob reproduces adverse selection from
+first principles — the same naive symmetric market maker flips from
+profitable to badly negative as the flow gets more informed:
+
+```
+market maker (half-spread 2, inventory skew) vs flow toxicity:
+  informed   0%    equity     52549   maxdd      282   avg sell-buy +0.32t
+  informed  20%    equity     97615   maxdd      235   avg sell-buy +0.53t
+  informed  40%    equity     91554   maxdd      258   avg sell-buy +0.49t
+  informed  60%    equity     46599   maxdd     1133   avg sell-buy +0.27t
+  informed  80%    equity   -145810   maxdd   152168   avg sell-buy -0.94t
+  informed 100%    equity   -349838   maxdd   351020   avg sell-buy -2.50t
+```
+
+Strategies implement a two-method trait (`on_wake` → actions, `on_event` →
+fills); the account tracks position, cash, mark-to-market equity, drawdown,
+and a buy/sell price decomposition that shows *where* P&L comes from.
+Runs are fully deterministic from the seed.
+
+```bash
+cargo run --release -p backtest
+```
 
 ## Running
 

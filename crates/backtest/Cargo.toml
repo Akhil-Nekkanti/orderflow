@@ -1,0 +1,9 @@
+[package]
+name = "backtest"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Event-driven backtester using the matching engine as a simulated exchange"
+
+[dependencies]
+lob = { path = "../lob" }
