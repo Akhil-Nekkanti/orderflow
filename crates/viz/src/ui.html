@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orderflow — live book</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --bid: #3987e5;      /* diverging cool pole (dark step) */
+    --ask: #e66767;      /* diverging warm pole (dark step) */
+    --up: #0ca30c;       /* delta ↑ */
+    --down: #d03b3b;     /* delta ↓ */
+    --ring: rgba(255,255,255,0.10);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 20px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 16px; font-weight: 600; }
+  h1 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .tiles { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+  .tile {
+    background: var(--surface);
+    border: 1px solid var(--ring);
+    border-radius: 8px;
+    padding: 8px 14px;
+    min-width: 110px;
+  }
+  .tile .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .tile .v { font-size: 18px; font-weight: 600; margin-top: 2px; }
+  .tile .v.pos { color: var(--up); }
+  .tile .v.neg { color: var(--down); }
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .controls span { color: var(--muted); font-size: 12px; }
+  button {
+    background: var(--surface);
+    color: var(--ink-2);
+    border: 1px solid var(--ring);
+    border-radius: 6px;
+    padding: 5px 12px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button.active { color: var(--ink); border-color: var(--bid); }
+  .grid { display: grid; grid-template-columns: 380px 1fr; gap: 14px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--ring);
+    border-radius: 8px;
+    padding: 14px;
+  }
+  .panel h2 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 10px; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink-2); margin-bottom: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td { padding: 1px 6px; font-size: 13px; }
+  .ladder td.qty { color: var(--ink-2); width: 52px; }
+  .ladder td.px { width: 56px; }
+  .ladder .bid-px { color: var(--bid); text-align: right; }
+  .ladder .ask-px { color: var(--ask); }
+  .ladder td.bar { position: relative; }
+  .ladder .fill { height: 12px; border-radius: 3px; }
+  .ladder .fill.b { background: var(--bid); margin-left: auto; }
+  .ladder .fill.a { background: var(--ask); }
+  .ladder tr:hover { background: rgba(255,255,255,0.04); }
+  .spread-row td { color: var(--muted); font-size: 12px; padding: 6px; text-align: center; border-top: 1px solid var(--grid); border-bottom: 1px solid var(--grid); }
+  #eq-wrap { position: relative; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: var(--page); border: 1px solid var(--ring); border-radius: 6px;
+    padding: 4px 8px; font-size: 12px; color: var(--ink-2); white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .tape td { font-size: 12.5px; color: var(--ink-2); }
+  .tape .px { font-variant-numeric: tabular-nums; }
+  .tape .up { color: var(--up); }
+  .tape .down { color: var(--down); }
+  .tape .strat td:first-child { border-left: 2px solid var(--bid); }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>orderflow <small>market maker vs. simulated flow — live</small></h1>
+
+<div class="tiles" id="tiles"></div>
+
+<div class="controls">
+  <span>flow toxicity (informed %):</span>
+  <span id="tox-buttons"></span>
+  <button id="pause">pause</button>
+</div>
+
+<div class="grid">
+  <div class="panel ladder">
+    <h2>depth ladder</h2>
+    <div class="legend"><span><i style="background:var(--bid)"></i>Bids</span><span><i style="background:var(--ask)"></i>Asks</span></div>
+    <table id="ladder"></table>
+  </div>
+  <div>
+    <div class="panel">
+      <h2>strategy equity (tick-lots)</h2>
+      <div id="eq-wrap">
+        <svg id="eq" width="100%" height="220" viewBox="0 0 640 220" preserveAspectRatio="none"></svg>
+        <div id="tooltip"></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>trade tape</h2>
+      <table class="tape" id="tape"></table>
+    </div>
+  </div>
+</div>
+
+<p class="foot">Engine: price-time priority limit order book. Strategy: inventory-skewed market maker
+(half-spread 2). Ticks classified by direction vs. previous trade. Restarting with a new toxicity
+reseeds deterministically.</p>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const fmt = n => Number(n).toLocaleString("en-US");
+let curve = [], paused = false, currentTox = 40;
+
+const TOX = [0, 20, 40, 60, 80, 100];
+$("tox-buttons").innerHTML = TOX.map(t =>
+  `<button data-tox="${t}">${t}</button>`).join(" ");
+document.querySelectorAll("[data-tox]").forEach(b =>
+  b.onclick = () => fetch("/set?informed=" + b.dataset.tox));
+$("pause").onclick = () => fetch("/pause");
+
+function tiles(s) {
+  const eqCls = s.equity > 0 ? "pos" : s.equity < 0 ? "neg" : "";
+  const items = [
+    ["step", fmt(s.step)],
+    ["mid", fmt(s.mark)],
+    ["bid / ask", `${fmt(s.best_bid)} / ${fmt(s.best_ask)}`],
+    ["position", fmt(s.position) + " lots"],
+    ["equity", fmt(s.equity), eqCls],
+    ["fills", fmt(s.fills)],
+  ];
+  $("tiles").innerHTML = items.map(([k, v, cls]) =>
+    `<div class="tile"><div class="k">${k}</div><div class="v ${cls || ""}">${v}</div></div>`).join("");
+}
+
+function ladder(s) {
+  const maxQ = Math.max(1, ...s.bids.map(l => l[1]), ...s.asks.map(l => l[1]));
+  const n = Math.max(s.bids.length, s.asks.length);
+  let rows = "";
+  for (let i = 0; i < n; i++) {
+    const b = s.bids[i], a = s.asks[i];
+    const bw = b ? Math.max(2, 100 * b[1] / maxQ) : 0;
+    const aw = a ? Math.max(2, 100 * a[1] / maxQ) : 0;
+    rows += `<tr title="${b ? `bid ${fmt(b[1])} @ ${fmt(b[0])}` : ""}${a ? `  ask ${fmt(a[1])} @ ${fmt(a[0])}` : ""}">
+      <td class="qty" style="text-align:right">${b ? fmt(b[1]) : ""}</td>
+      <td class="bar">${b ? `<div class="fill b" style="width:${bw}%"></div>` : ""}</td>
+      <td class="px bid-px">${b ? fmt(b[0]) : ""}</td>
+      <td class="px ask-px">${a ? fmt(a[0]) : ""}</td>
+      <td class="bar">${a ? `<div class="fill a" style="width:${aw}%"></div>` : ""}</td>
+      <td class="qty">${a ? fmt(a[1]) : ""}</td></tr>`;
+    if (i === 0) {
+      const spread = s.best_ask && s.best_bid ? s.best_ask - s.best_bid : "—";
+      rows += `<tr class="spread-row"><td colspan="6">spread ${spread}</td></tr>`;
+    }
+  }
+  $("ladder").innerHTML = rows;
+}
+
+const W = 640, H = 220, PAD = { l: 8, r: 58, t: 10, b: 18 };
+function equity(s) {
+  curve = s.curve;
+  const svg = $("eq");
+  if (curve.length < 2) { svg.innerHTML = ""; return; }
+  const xs = curve.map(p => p[0]), ys = curve.map(p => p[1]);
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  let y0 = Math.min(0, ...ys), y1 = Math.max(0, ...ys);
+  if (y0 === y1) { y0 -= 1; y1 += 1; }
+  const X = v => PAD.l + (v - x0) / (x1 - x0 || 1) * (W - PAD.l - PAD.r);
+  const Y = v => PAD.t + (1 - (v - y0) / (y1 - y0)) * (H - PAD.t - PAD.b);
+  let g = "";
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i++) {
+    const v = y0 + (y1 - y0) * i / ticks, y = Y(v);
+    g += `<line x1="${PAD.l}" x2="${W - PAD.r}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`;
+    g += `<text x="${W - PAD.r + 6}" y="${y + 4}" fill="var(--muted)" font-size="11" font-family="system-ui">${fmt(Math.round(v))}</text>`;
+  }
+  g += `<line x1="${PAD.l}" x2="${W - PAD.r}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--baseline)" stroke-width="1"/>`;
+  const path = curve.map((p, i) => (i ? "L" : "M") + X(p[0]).toFixed(1) + " " + Y(p[1]).toFixed(1)).join("");
+  g += `<path d="${path}" fill="none" stroke="var(--bid)" stroke-width="2" stroke-linejoin="round"/>`;
+  g += `<g id="xh" style="display:none"><line id="xh-l" y1="${PAD.t}" y2="${H - PAD.b}" stroke="var(--baseline)" stroke-width="1"/><circle id="xh-c" r="4" fill="var(--bid)" stroke="var(--surface)" stroke-width="2"/></g>`;
+  svg.innerHTML = g;
+  svg._scale = { X, Y, x0, x1 };
+}
+
+$("eq").addEventListener("mousemove", e => {
+  const svg = $("eq");
+  if (!svg._scale || curve.length < 2) return;
+  const r = svg.getBoundingClientRect();
+  const fx = (e.clientX - r.left) / r.width * W;
+  const { X, Y, x0, x1 } = svg._scale;
+  const t = x0 + (fx - PAD.l) / (W - PAD.l - PAD.r) * (x1 - x0);
+  let best = 0, bd = Infinity;
+  curve.forEach((p, i) => { const d = Math.abs(p[0] - t); if (d < bd) { bd = d; best = i; } });
+  const [cs, cv] = curve[best];
+  const xh = $("xh"); xh.style.display = "";
+  $("xh-l").setAttribute("x1", X(cs)); $("xh-l").setAttribute("x2", X(cs));
+  const c = $("xh-c"); c.setAttribute("cx", X(cs)); c.setAttribute("cy", Y(cv));
+  const tip = $("tooltip");
+  tip.style.display = "block";
+  tip.textContent = `step ${fmt(cs)} · equity ${fmt(cv)}`;
+  tip.style.left = Math.min(e.clientX - r.left + 12, r.width - 150) + "px";
+  tip.style.top = (Y(cv) / H * r.height - 30) + "px";
+});
+$("eq").addEventListener("mouseleave", () => {
+  const xh = $("xh"); if (xh) xh.style.display = "none";
+  $("tooltip").style.display = "none";
+});
+
+function tape(s) {
+  let prev = null, rows = "";
+  const items = s.tape.slice().reverse(); // oldest first for tick direction
+  const dir = [];
+  for (const t of items) {
+    dir.push(prev === null ? 0 : Math.sign(t[1] - prev));
+    prev = t[1];
+  }
+  for (let i = items.length - 1; i >= 0 && rows.length < 6000; i--) {
+    const [step, px, qty, strat] = items[i];
+    const d = dir[i];
+    const cls = d > 0 ? "up" : d < 0 ? "down" : "";
+    const arrow = d > 0 ? "▲" : d < 0 ? "▼" : "·";
+    rows += `<tr class="${strat ? "strat" : ""}"><td>${fmt(step)}</td>
+      <td class="px ${cls}">${arrow} ${fmt(px)}</td><td>${fmt(qty)}</td>
+      <td>${strat ? "strategy" : ""}</td></tr>`;
+  }
+  $("tape").innerHTML = rows;
+}
+
+function highlightTox() {
+  document.querySelectorAll("[data-tox]").forEach(b =>
+    b.classList.toggle("active", Number(b.dataset.tox) === currentTox));
+  $("pause").textContent = paused ? "resume" : "pause";
+}
+
+async function poll() {
+  try {
+    const s = await (await fetch("/state")).json();
+    if (s.step !== undefined) {
+      paused = s.paused; currentTox = s.informed;
+      tiles(s); ladder(s); equity(s); tape(s); highlightTox();
+    }
+  } catch (e) { /* server restarting; keep polling */ }
+  setTimeout(poll, 150);
+}
+poll();
+</script>
+</body>
+</html>

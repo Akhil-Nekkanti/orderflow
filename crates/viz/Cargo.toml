@@ -1,0 +1,10 @@
+[package]
+name = "viz"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Live order book dashboard: std-only HTTP server over a running simulation"
+
+[dependencies]
+lob = { path = "../lob" }
+backtest = { path = "../backtest" }

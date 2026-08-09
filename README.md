@@ -16,6 +16,8 @@ crates/
   bench     dependency-free microbenchmark suite (median-of-trials)
   backtest  event-driven backtester using the engine as a simulated
             exchange, with queue-position-accurate fills
+  viz       live dashboard: std-only HTTP server + embedded single-page
+            UI over a running simulation
 ```
 
 ## Design
@@ -133,6 +135,22 @@ Runs are fully deterministic from the seed.
 ```bash
 cargo run --release -p backtest
 ```
+
+## Live dashboard
+
+```bash
+cargo run --release -p viz
+```
+
+Then open http://127.0.0.1:7878 — a live depth ladder, the market maker's
+equity curve (with crosshair), a trade tape with tick-direction coloring, and
+buttons that restart the simulation at any flow-toxicity level so you can
+*watch* the same strategy make money at 20% informed flow and bleed at 100%.
+
+The server is ~200 lines over `std::net::TcpListener` — no web framework, no
+JSON library (the snapshot is hand-serialized), consistent with the
+zero-dependency rule. The simulation runs on its own thread and publishes a
+pre-serialized snapshot; HTTP handlers only ever clone a string.
 
 ## Running
 

@@ -306,6 +306,7 @@ fn compute_metrics(curve: &[(u64, i128)]) -> (i128, f64) {
 // Simulator
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Debug)]
 pub struct SimConfig {
     /// Background messages to process.
     pub steps: u64,
@@ -338,51 +339,100 @@ impl Default for SimConfig {
     }
 }
 
-pub fn run<S: Strategy>(cfg: &SimConfig, strategy: &mut S) -> Report {
-    let mut book = OrderBook::with_capacity(1 << 16);
-    let mut flow = FlowGen::new(cfg.seed, cfg.start_mid);
-    let mut account = Account::default();
-    let mut ids = IdGen::new();
-    let mut sink = VecSink::default();
-    let mut actions: Vec<Action> = Vec::new();
-    let mut last_trade: Option<Price> = None;
-    let mut last_mark = cfg.start_mid;
-    let mut curve: Vec<(u64, i128)> = Vec::new();
+/// A recent trade for display purposes: step, price, qty, and whether the
+/// strategy was on either side of it.
+#[derive(Clone, Copy, Debug)]
+pub struct Tape {
+    pub step: u64,
+    pub price: Price,
+    pub qty: Qty,
+    pub strategy_involved: bool,
+}
+
+/// Incremental simulator. [`Sim::step`] processes exactly one background
+/// message plus any strategy wake-up it triggers, so callers can drive the
+/// simulation to completion ([`run`]) or pace it live (the viz dashboard).
+pub struct Sim<S: Strategy> {
+    cfg: SimConfig,
+    book: OrderBook,
+    flow: FlowGen,
+    account: Account,
+    ids: IdGen,
+    sink: VecSink,
+    actions: Vec<Action>,
+    strategy: S,
+    last_trade: Option<Price>,
+    last_mark: Price,
+    curve: Vec<(u64, i128)>,
     // Side of each open strategy order, needed to book fills where the
     // strategy is the resting maker.
-    let mut open_sides: std::collections::HashMap<OrderId, Side> = std::collections::HashMap::new();
+    open_sides: std::collections::HashMap<OrderId, Side>,
+    step: u64,
+    /// Ring of recent trades (all participants), newest last, capped.
+    pub tape: std::collections::VecDeque<Tape>,
+}
 
-    for step in 0..cfg.steps {
-        // 1. One background message.
-        sink.events.clear();
-        let book_mid = match (book.best_bid(), book.best_ask()) {
-            (Some(b), Some(a)) => Some((b + a) / 2),
-            _ => last_trade,
-        };
-        match flow.next_op(book_mid, cfg.informed_pct) {
-            FlowOp::Limit(id, side, price, qty, tif) => {
-                book.submit_limit(id, side, price, qty, tif, &mut sink)
-            }
-            FlowOp::Market(id, side, qty) => book.submit_market(id, side, qty, &mut sink),
-            FlowOp::Cancel(id) => book.cancel(id, &mut sink),
-            FlowOp::Replace(id, price, qty) => book.replace(id, price, qty, &mut sink),
+const TAPE_CAP: usize = 128;
+
+impl<S: Strategy> Sim<S> {
+    pub fn new(cfg: SimConfig, strategy: S) -> Self {
+        let flow = FlowGen::new(cfg.seed, cfg.start_mid);
+        let last_mark = cfg.start_mid;
+        Sim {
+            cfg,
+            book: OrderBook::with_capacity(1 << 16),
+            flow,
+            account: Account::default(),
+            ids: IdGen::new(),
+            sink: VecSink::default(),
+            actions: Vec::new(),
+            strategy,
+            last_trade: None,
+            last_mark,
+            curve: Vec::new(),
+            open_sides: std::collections::HashMap::new(),
+            step: 0,
+            tape: std::collections::VecDeque::new(),
         }
-        route_events(&sink, &open_sides, &mut account, &mut last_trade, strategy);
-        prune_filled(&sink, &mut open_sides);
+    }
+
+    /// Processes one background message (and the strategy wake-up, equity
+    /// sample it may trigger).
+    pub fn step(&mut self) {
+        let step = self.step;
+
+        // 1. One background message.
+        self.sink.events.clear();
+        let book_mid = match (self.book.best_bid(), self.book.best_ask()) {
+            (Some(b), Some(a)) => Some((b + a) / 2),
+            _ => self.last_trade,
+        };
+        match self.flow.next_op(book_mid, self.cfg.informed_pct) {
+            FlowOp::Limit(id, side, price, qty, tif) => {
+                self.book
+                    .submit_limit(id, side, price, qty, tif, &mut self.sink)
+            }
+            FlowOp::Market(id, side, qty) => self.book.submit_market(id, side, qty, &mut self.sink),
+            FlowOp::Cancel(id) => self.book.cancel(id, &mut self.sink),
+            FlowOp::Replace(id, price, qty) => self.book.replace(id, price, qty, &mut self.sink),
+        }
+        self.route_events();
 
         // 2. Strategy wake-up.
-        if step >= cfg.warmup && step % cfg.wake_every == 0 {
-            actions.clear();
+        if step >= self.cfg.warmup && step.is_multiple_of(self.cfg.wake_every) {
+            self.actions.clear();
             let view = MarketView {
-                book: &book,
+                book: &self.book,
                 step,
-                last_trade,
-                position: account.position,
-                cash: account.cash,
+                last_trade: self.last_trade,
+                position: self.account.position,
+                cash: self.account.cash,
             };
-            strategy.on_wake(&view, &mut ids, &mut actions);
-            for &action in actions.iter() {
-                sink.events.clear();
+            self.strategy
+                .on_wake(&view, &mut self.ids, &mut self.actions);
+            for i in 0..self.actions.len() {
+                let action = self.actions[i];
+                self.sink.events.clear();
                 match action {
                     Action::Limit {
                         id,
@@ -391,105 +441,164 @@ pub fn run<S: Strategy>(cfg: &SimConfig, strategy: &mut S) -> Report {
                         qty,
                         tif,
                     } => {
-                        open_sides.insert(id, side);
-                        book.submit_limit(id, side, price, qty, tif, &mut sink);
+                        self.open_sides.insert(id, side);
+                        self.book
+                            .submit_limit(id, side, price, qty, tif, &mut self.sink);
                     }
                     Action::Market { id, side, qty } => {
-                        open_sides.insert(id, side);
-                        book.submit_market(id, side, qty, &mut sink);
+                        self.open_sides.insert(id, side);
+                        self.book.submit_market(id, side, qty, &mut self.sink);
                     }
-                    Action::Cancel { id } => book.cancel(id, &mut sink),
-                    Action::Replace { id, price, qty } => book.replace(id, price, qty, &mut sink),
+                    Action::Cancel { id } => self.book.cancel(id, &mut self.sink),
+                    Action::Replace { id, price, qty } => {
+                        self.book.replace(id, price, qty, &mut self.sink)
+                    }
                 }
-                route_events(&sink, &open_sides, &mut account, &mut last_trade, strategy);
-                prune_filled(&sink, &mut open_sides);
+                self.route_events();
             }
         }
 
         // 3. Sample the equity curve.
-        if step % cfg.sample_every == 0 {
-            if let (Some(b), Some(a)) = (book.best_bid(), book.best_ask()) {
-                last_mark = (b + a) / 2;
-            } else if let Some(p) = last_trade {
-                last_mark = p;
+        if step.is_multiple_of(self.cfg.sample_every) {
+            if let (Some(b), Some(a)) = (self.book.best_bid(), self.book.best_ask()) {
+                self.last_mark = (b + a) / 2;
+            } else if let Some(p) = self.last_trade {
+                self.last_mark = p;
             }
-            curve.push((step, account.equity(last_mark)));
+            self.curve.push((step, self.account.equity(self.last_mark)));
+        }
+
+        self.step = step + 1;
+    }
+
+    /// Books fills touching strategy orders, forwards their events, records
+    /// the trade tape, and prunes bookkeeping for departed orders.
+    fn route_events(&mut self) {
+        for ev in &self.sink.events {
+            if let Event::Trade {
+                maker,
+                taker,
+                price,
+                qty,
+            } = *ev
+            {
+                self.last_trade = Some(price);
+                let strat = is_strategy(maker) || is_strategy(taker);
+                // Strategy on exactly one side of a trade (it never
+                // self-crosses in the demo strategies; if it did, both arms
+                // fire and net out).
+                if is_strategy(maker) {
+                    let side = self.open_sides[&maker];
+                    self.account.on_fill(side, price, qty);
+                }
+                if is_strategy(taker) {
+                    let side = self.open_sides[&taker];
+                    self.account.on_fill(side, price, qty);
+                }
+                if self.tape.len() == TAPE_CAP {
+                    self.tape.pop_front();
+                }
+                self.tape.push_back(Tape {
+                    step: self.step,
+                    price,
+                    qty,
+                    strategy_involved: strat,
+                });
+            }
+            let involves = match *ev {
+                Event::Trade { maker, taker, .. } => is_strategy(maker) || is_strategy(taker),
+                Event::Accepted { id }
+                | Event::Canceled { id, .. }
+                | Event::Replaced { id }
+                | Event::Rejected { id, .. } => is_strategy(id),
+            };
+            if involves {
+                self.strategy.on_event(ev);
+            }
+            if let Event::Canceled { id, .. } = *ev
+                && is_strategy(id)
+            {
+                self.open_sides.remove(&id);
+            }
+            // Fully-filled makers keep a stale side entry; harmless since
+            // ids are never reused, and bounded by total strategy orders.
         }
     }
 
-    let final_equity = account.equity(last_mark);
-    curve.push((cfg.steps, final_equity));
-    let (max_dd, sharpe) = compute_metrics(&curve);
-    Report {
-        steps: cfg.steps,
-        fills: account.fills,
-        traded_lots: account.traded_lots,
-        bought_lots: account.bought_lots,
-        bought_notional: account.bought_notional,
-        sold_lots: account.sold_lots,
-        sold_notional: account.sold_notional,
-        final_position: account.position,
-        final_equity,
-        return_ticklots: final_equity,
-        max_drawdown_ticklots: max_dd,
-        sharpe_per_sample: sharpe,
-        equity_curve: curve,
+    // Read-side accessors for live consumers (the dashboard).
+
+    pub fn book(&self) -> &OrderBook {
+        &self.book
+    }
+
+    pub fn account(&self) -> &Account {
+        &self.account
+    }
+
+    pub fn current_step(&self) -> u64 {
+        self.step
+    }
+
+    pub fn last_trade(&self) -> Option<Price> {
+        self.last_trade
+    }
+
+    /// Most recent mark price (mid, falling back to last trade).
+    pub fn mark(&self) -> Price {
+        self.last_mark
+    }
+
+    pub fn equity_curve(&self) -> &[(u64, i128)] {
+        &self.curve
+    }
+
+    pub fn config(&self) -> &SimConfig {
+        &self.cfg
+    }
+
+    /// Metrics over everything simulated so far.
+    pub fn report(&self) -> Report {
+        let final_equity = self.account.equity(self.last_mark);
+        let mut curve = self.curve.clone();
+        curve.push((self.step, final_equity));
+        let (max_dd, sharpe) = compute_metrics(&curve);
+        Report {
+            steps: self.step,
+            fills: self.account.fills,
+            traded_lots: self.account.traded_lots,
+            bought_lots: self.account.bought_lots,
+            bought_notional: self.account.bought_notional,
+            sold_lots: self.account.sold_lots,
+            sold_notional: self.account.sold_notional,
+            final_position: self.account.position,
+            final_equity,
+            return_ticklots: final_equity,
+            max_drawdown_ticklots: max_dd,
+            sharpe_per_sample: sharpe,
+            equity_curve: curve,
+        }
     }
 }
 
-/// Books fills touching strategy orders and forwards their events.
-fn route_events<S: Strategy>(
-    sink: &VecSink,
-    open_sides: &std::collections::HashMap<OrderId, Side>,
-    account: &mut Account,
-    last_trade: &mut Option<Price>,
-    strategy: &mut S,
-) {
-    for ev in &sink.events {
-        if let Event::Trade {
-            maker,
-            taker,
-            price,
-            qty,
-        } = *ev
-        {
-            *last_trade = Some(price);
-            // Strategy on exactly one side of a trade (it never self-crosses
-            // in the demo strategies; if it did, both arms fire and net out).
-            if is_strategy(maker) {
-                let side = open_sides[&maker];
-                account.on_fill(side, price, qty);
-            }
-            if is_strategy(taker) {
-                let side = open_sides[&taker];
-                account.on_fill(side, price, qty);
-            }
-        }
-        let involves = match *ev {
-            Event::Trade { maker, taker, .. } => is_strategy(maker) || is_strategy(taker),
-            Event::Accepted { id }
-            | Event::Canceled { id, .. }
-            | Event::Replaced { id }
-            | Event::Rejected { id, .. } => is_strategy(id),
-        };
-        if involves {
-            strategy.on_event(ev);
-        }
+/// Runs a complete simulation to `cfg.steps` and returns the report.
+pub fn run<S: Strategy>(cfg: &SimConfig, strategy: &mut S) -> Report {
+    let mut sim = Sim::new(cfg.clone(), PassThrough(strategy));
+    while sim.current_step() < sim.cfg.steps {
+        sim.step();
     }
+    sim.report()
 }
 
-/// Drops bookkeeping for strategy orders that left the book.
-fn prune_filled(sink: &VecSink, open_sides: &mut std::collections::HashMap<OrderId, Side>) {
-    for ev in &sink.events {
-        if let Event::Canceled { id, .. } = *ev
-            && is_strategy(id)
-        {
-            open_sides.remove(&id);
-        }
-        // Fully-filled makers no longer need their side entry either, but a
-        // stale entry is harmless (ids are never reused) and pruning fills
-        // exactly would require tracking remaining qty here. Memory cost is
-        // bounded by total strategy orders, fine for a backtest run.
+/// Adapter so `run` can borrow a strategy instead of owning it.
+struct PassThrough<'a, S: Strategy>(&'a mut S);
+
+impl<S: Strategy> Strategy for PassThrough<'_, S> {
+    fn on_wake(&mut self, view: &MarketView, ids: &mut IdGen, out: &mut Vec<Action>) {
+        self.0.on_wake(view, ids, out)
+    }
+
+    fn on_event(&mut self, ev: &Event) {
+        self.0.on_event(ev)
     }
 }
 

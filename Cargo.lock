@@ -30,6 +30,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "viz"
+version = "0.1.0"
+dependencies = [
+ "backtest",
+ "lob",
+]
+
+[[package]]
 name = "wire"
 version = "0.1.0"
 dependencies = [
